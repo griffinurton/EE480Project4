@@ -109,6 +109,14 @@ module processor(halt, reset, clk);
         thread <= !thread;
     end
 
+    // TO DO
+    // Instantiate slowmem
+    // Cache register file
+    // Hash function
+    // Prefetch
+    // Determine associativity (really though, we're just going to use dirty bit)
+    
+    
     // Stage 1
     always @(posedge clk) begin
         // Get next instruction.
