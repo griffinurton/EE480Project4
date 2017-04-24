@@ -1,10 +1,3 @@
-
-
-
-
-
-
-
 // Slow Memory Code
 
 `define WORD [15:0]
