@@ -1,7 +1,11 @@
 // Processor Module (Matt's)
-// Sizes 
+// Sizes
 `define WORD	[15:0]
-`define CacheLine [31:0]
+`define LINESIZE [31:0]
+`define CACHESIZE [15:0]
+`define Addr    [31:22]
+`define Data    [21:6]
+`define Dirty   [5]
 `define Opcode	[15:12]
 `define Immed	[11:0]
 `define STATE	[7:0]
@@ -9,6 +13,8 @@
 `define REGSIZE	[511:0]
 `define REGNUM	[7:0]
 `define MEMSIZE [131071:0]
+
+`define Hash [3:0] //temporary "hash"
 
 // Op-code values
 
@@ -55,7 +61,18 @@ module processor(halt, reset, clk);
     // The stack and memory registers.
     reg `WORD r `REGSIZE;
     reg `WORD m `MEMSIZE;
+    //instruction and data caches
+    reg `CACHELINE data_cache `CACHESIZE;
+    reg `CACHELINE inst_cache `CACHESIZE;
 
+    //main slow memory
+    reg mfc;
+    reg `WORD read_data;
+    wire `WORD addr;
+    wire `WORD wdata;
+    wire rnotw;
+    wire strobe;
+    slowmem Mem(mfc, rdata, addr, wdata, rnotw, strobe, clk);
     // The program counter, instruction register, state number,
     // and stack pointer.
     reg `WORD pc [0:1];
@@ -120,8 +137,8 @@ module processor(halt, reset, clk);
         // FIFO / FILO (with dirty line preference)
         // Least frequently touched
         // Least recently touched
-    
-    
+
+
     // Stage 1
     always @(posedge clk) begin
         // Get next instruction.
@@ -130,6 +147,19 @@ module processor(halt, reset, clk);
         if (pc_check[thread]) begin
             pc[thread] <= pc_jump[thread]+1; //if we need to jump, set the pc accordingly
             ir[thread] <= m[{thread, pc_jump[thread]}]; // use the provided pc_jump which should point where our next instruction is
+            // a = {thread, pc_jump[thread]}
+            // h(a) = a`Hash;
+            // line = inst_cache[h(a)]
+            // hit_check = line`Addr
+            //if(hit_check == a)
+                //ir[thread] <= data_cache[h(a)]
+            //else
+                //need to do some checks (since inst should defer to data)
+                //should have a flag for data reading and inst reading
+                //nop if either is 1 (same thread's inst shouldn't be reading, but the other thread's could be) --Need to ask Dietz if threads share memory.
+                //addr = a, rnotw = 1, strobe = 1
+                //nop until strobe is turned off
+                //ir[thread] <= rdata
             sn_stage2 <= { (m[{thread, pc_jump[thread]}] `Opcode), ((m[{thread, pc_jump[thread]}] `Opcode == 0) ? m[{thread, pc_jump[thread]}][3:0] : 4'b0) };
         end
         else begin
@@ -140,7 +170,7 @@ module processor(halt, reset, clk);
         end
       end
       else begin
-        ir[thread] <= {8'hff, `OPInitial}; //essentially a nop, can change label later --Matthew
+        ir[thread] <= {8'hff, `OPInitial};
         sn_stage2 <= `OPInitial;
       end
     end
