@@ -112,6 +112,7 @@ module processor(halt, reset, clk);
     // TO DO
     // Instantiate slowmem
     // Cache register file
+        // define cache size
     // Hash function
     // Prefetch
     // Determine associativity (really though, we're just going to use dirty bit)
