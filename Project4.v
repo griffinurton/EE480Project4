@@ -114,8 +114,12 @@ module processor(halt, reset, clk);
     // Cache register file
         // define cache size
     // Hash function
-    // Prefetch
+    // Prefetch (last)
     // Determine associativity (really though, we're just going to use dirty bit)
+    // Determine replacement policy
+        // FIFO / FILO
+        // Least frequently touched
+        // Least recently touched
     
     
     // Stage 1
