@@ -117,7 +117,7 @@ module processor(halt, reset, clk);
     // Prefetch (last)
     // Determine associativity (really though, we're just going to use dirty bit)
     // Determine replacement policy
-        // FIFO / FILO
+        // FIFO / FILO (with dirty line preference)
         // Least frequently touched
         // Least recently touched
     
