@@ -93,6 +93,11 @@ module processor(halt, reset, clk);
     reg `REGNUM d_stage4;
     reg `REGNUM s_stage4;
 
+    //registers for when stage 4 is reading and needs to block the rest of the stages
+    reg `REGNUM d4_temp;
+    reg `REGNUM s4_temp;
+    reg `STATE sn4_temp = `OPInitial;
+
     reg `REGNUM fetch_d;
     reg `REGNUM fetch_s;
     reg `WORD fetch_word;
@@ -151,7 +156,7 @@ module processor(halt, reset, clk);
     // Stage 1
     always @(posedge clk) begin
         // Get next instruction.
-      if(!stalled[thread]/* & !inst_read_stall[thread]*/) begin
+      if(!stalled[thread]/* & !inst_read_stall[thread] & !data_read_stall[thread]*/) begin
 
         if (pc_check[thread]) begin
             pc[thread] <= pc_jump[thread]+1; //if we need to jump, set the pc accordingly
@@ -222,6 +227,10 @@ module processor(halt, reset, clk);
               //ir[thread] <= {8'hff, `OPInitial};
               //sn_stage2 <= `OPInitial;
           //end
+      //end
+      //else if(data_read_stall[thread] == 1) begin
+        //ir[thread] <= {8'hff, `OPInitial};
+        //sn_stage2 <= `OPInitial;
       //end
       else begin
         ir[thread] <= {8'hff, `OPInitial};
@@ -452,13 +461,21 @@ module processor(halt, reset, clk);
             end
 
         endcase
-        sn_stage4 <= sn_stage3;
-        d_stage4 <= d_stage3;
-        s_stage4 <= s_stage3;
+        //if(!data_reading) begin
+          sn_stage4 <= sn_stage3;
+          d_stage4 <= d_stage3;
+          s_stage4 <= s_stage3;
+          //end
+        //else begin
+          //sn4_temp <= sn_stage3;
+          //d4_temp <= d_stage3;
+          //s4_temp <= s_stage3
+        //end
     end
 
     // Stage 4
     always @(posedge clk) begin
+        //if(!data_reading)
         case(sn_stage4)
             `OPAdd: begin
                 r[{!thread, d_stage4}] <= fetch_d + fetch_s;
@@ -529,14 +546,17 @@ module processor(halt, reset, clk);
                 preit[!thread] <= 1;
             end
             `OPInitial: begin
-                //$display("Initial Stage 4 !thread %b", !thread);
-                //I guess this is the equivalent of a NOP? --Matthew
             end
             default: begin
                 halt[!thread] <= 1;
                 //$display("halt stage 4");
             end
       endcase
+      //else
+        //check mfc
+        //if the read is done then write that data to the cache (at h(a)) write to main mem if value is dirty
+        //get the next state from the _temp registers
+        //set flags (data_reading)
     end
 endmodule
 
