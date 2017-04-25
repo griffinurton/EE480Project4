@@ -3,6 +3,7 @@
 `define WORD	[15:0]
 `define LINESIZE [31:0]
 `define CACHESIZE [15:0]
+`define CACHEADDRSIZE [3:0]
 `define Addr    [31:22]
 `define Data    [21:6]
 `define Dirty   [5]
@@ -73,6 +74,14 @@ module processor(halt, reset, clk);
     wire rnotw;
     wire strobe;
     slowmem Mem(mfc, rdata, addr, wdata, rnotw, strobe, clk);
+
+    //flags dealing with memory
+    reg data_trumps_inst[0:1]; //denotes if the data_cache has invoked priority over the inst_cache
+    reg data_reading[0:1]; //we are waiting for slowmem to finish reading for the data_cache
+    reg inst_reading[0:1]; //we are waiting for slowmem to finish reading for the inst_cache
+    reg inst_read_stall[0:1];
+    reg `WORD pc_read
+    reg `CACHEADDRSIZE inst_cache_addr [0:1];
     // The program counter, instruction register, state number,
     // and stack pointer.
     reg `WORD pc [0:1];
@@ -142,33 +151,78 @@ module processor(halt, reset, clk);
     // Stage 1
     always @(posedge clk) begin
         // Get next instruction.
-      if(!stalled[thread]) begin
+      if(!stalled[thread]/* & !inst_read_stall[thread]*/) begin
 
         if (pc_check[thread]) begin
             pc[thread] <= pc_jump[thread]+1; //if we need to jump, set the pc accordingly
+            //get rid of the ir and sn_stage2 setting
             ir[thread] <= m[{thread, pc_jump[thread]}]; // use the provided pc_jump which should point where our next instruction is
+            //need to make sure we don't do the two above reads if we're waiting on memory
             // a = {thread, pc_jump[thread]}
             // h(a) = a`Hash;
             // line = inst_cache[h(a)]
             // hit_check = line`Addr
-            //if(hit_check == a)
-                //ir[thread] <= data_cache[h(a)]
+            //if(inst_cache[{thread,pc_jump[thread]}`Hash]`Addr == {thread, pc_jump[thread]}) begin
+                //ir[thread] <= inst_cache[{thread,pc_jump[thread]}`Hash];
+                //sn_stage2 <= { (inst_cache[{thread,pc_jump[thread]}`Hash] `Opcode), ((inst_cache[{thread,pc_jump[thread]}`Hash] `Opcode == 0) ? inst_cache[{thread,pc_jump[thread]}`Hash][3:0] : 4'b0) };
             //else
-                //need to do some checks (since inst should defer to data)
-                //should have a flag for data reading and inst reading
-                //nop if either is 1 (same thread's inst shouldn't be reading, but the other thread's could be) --Need to ask Dietz if threads share memory.
-                //addr = a, rnotw = 1, strobe = 1
-                //nop until strobe is turned off
-                //ir[thread] <= rdata
+                //if(data_reading == 0) begin
+                    //inst_reading = 1;
+                    //inst_read_stall = 1;
+                    //rnotw = 1;
+                    //addr = {thread, pc_jump[thread]};
+                    //set the strobe to 1?
+                    //inst_cache_addr[thread] <= {thread,pc_jump[thread]}`Hash;
+                //else
+                    //inst_read_stall = 1;
+            //end
             sn_stage2 <= { (m[{thread, pc_jump[thread]}] `Opcode), ((m[{thread, pc_jump[thread]}] `Opcode == 0) ? m[{thread, pc_jump[thread]}][3:0] : 4'b0) };
         end
         else begin
             pc[thread] <= pc[thread] + 1;
+            //if(inst_cache[{thread,pc[thread]}`Hash]`Addr == {thread, pc[thread]}) begin
+                //ir[thread] <= inst_cache[{thread,pc[thread]}`Hash];
+                //sn_stage2 <= { (inst_cache[{thread,pc[thread]}`Hash] `Opcode), ((inst_cache[{thread,pc[thread]}`Hash] `Opcode == 0) ? inst_cache[{thread,pc[thread]}`Hash][3:0] : 4'b0) };
+            //else begin
+                //if(data_reading == 0) begin
+                    //inst_reading = 1;
+                    //inst_read_stall = 1;
+                    //rnotw = 1;
+                    //addr = {thread, pc[thread]};
+                    //set the strobe to 1?
+                    //inst_cache_addr[thread] <= {thread,pc[thread]}`Hash;
+                //else
+                    //inst_read_stall = 1;
+            //end
             ir[thread] <= m[{thread, pc[thread]}];
             sn_stage2 <= { (m[{thread, pc[thread]}] `Opcode), ((m[{thread, pc[thread]}] `Opcode == 0) ? m[{thread, pc[thread]}][3:0] : 4'b0) };
 
         end
       end
+      //else if(inst_read_stall == 1) begin
+          //if(inst_reading = 1) begin
+              //if(mfc == 1) begin
+                  //ir[thread] <= rdata;
+                  //sn_stage2<= { (rdata `Opcode), ((rdata ? rdata : 4'b0) };
+                  //inst_cache[inst_cache_addr[thread]] <= {{thread, pc_jump[thread]} [9:0], rdata, 000000 };
+                  //inst_reading = 0;
+                  //inst_read_stall = 0;
+              //else begin
+                  //ir[thread] <= {8'hff, `OPInitial};
+                  //sn_stage2 <= `OPInitial;
+              //end
+          //else begin
+              //if(data_reading == 0) begin
+                  //inst_reading = 1;
+                  //rnotw = 1;
+                  //addr = {thread, pc_jump[thread]};
+                  //set the strobe to 1?
+                  //inst_cache_addr[thread] <= {thread,pc_jump[thread]}`Hash;
+              //end
+              //ir[thread] <= {8'hff, `OPInitial};
+              //sn_stage2 <= `OPInitial;
+          //end
+      //end
       else begin
         ir[thread] <= {8'hff, `OPInitial};
         sn_stage2 <= `OPInitial;
@@ -434,6 +488,12 @@ module processor(halt, reset, clk);
                 r[{!thread, d_stage4}] <= fetch_d ^ fetch_s;
             end
             `OPLoad: begin
+                //will have to set flag to denote memory is being read
+                //probably have to stop the states in this thread (behind the current stage) from
+                //continuing while that flag is up
+                //then need to determine priority, can set another flag to denote that the
+                //instruction read has been canceled for this read, then have stage 1 wait till
+                //the read is finished to redo its read
                 r[{!thread, d_stage4}] <= m[fetch_d];
             end
             `OPStore: begin
