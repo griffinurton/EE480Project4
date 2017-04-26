@@ -15,7 +15,7 @@
 `define REGNUM	[7:0]
 `define MEMSIZE [131071:0]
 
-`define Hash [3:0] //temporary "hash"
+`define Hash & 4'b1111//[3:0] //temporary "hash"
 
 // Op-code values
 
@@ -63,25 +63,27 @@ module processor(halt, reset, clk);
     reg `WORD r `REGSIZE;
     reg `WORD m `MEMSIZE;
     //instruction and data caches
-    reg `CACHELINE data_cache `CACHESIZE;
-    reg `CACHELINE inst_cache `CACHESIZE;
+    reg `LINESIZE data_cache `CACHESIZE;
+    reg `LINESIZE inst_cache `CACHESIZE;
 
     //main slow memory
-    reg mfc;
-    reg `WORD read_data;
-    wire `WORD addr;
-    wire `WORD wdata;
-    wire rnotw;
-    wire strobe;
-    slowmem Mem(mfc, rdata, addr, wdata, rnotw, strobe, clk);
+    wire mfc[0:1];
+    wire `WORD rdata[0:1];
+    reg `WORD addr[0:1];
+    reg `WORD wdata[0:1];
+    reg rnotw[0:1];
+    reg strobe[0:1];
+    slowmem Mem0(mfc[0], rdata[0], addr[0], wdata[0], rnotw[0], strobe[0], clk);
+    slowmem Mem1(mfc[1], rdata[1], addr[1], wdata[1], rnotw[1], strobe[1], clk);
 
     //flags dealing with memory
     reg data_trumps_inst[0:1]; //denotes if the data_cache has invoked priority over the inst_cache
     reg data_reading[0:1]; //we are waiting for slowmem to finish reading for the data_cache
     reg inst_reading[0:1]; //we are waiting for slowmem to finish reading for the inst_cache
     reg inst_read_stall[0:1];
-    reg `WORD pc_read
+    reg `WORD pc_read[0:1];
     reg `CACHEADDRSIZE inst_cache_addr [0:1];
+    reg `CACHEADDRSIZE data_cache_addr [0:1];
     // The program counter, instruction register, state number,
     // and stack pointer.
     reg `WORD pc [0:1];
@@ -94,9 +96,10 @@ module processor(halt, reset, clk);
     reg `REGNUM s_stage4;
 
     //registers for when stage 4 is reading and needs to block the rest of the stages
-    reg `REGNUM d4_temp;
-    reg `REGNUM s4_temp;
-    reg `STATE sn4_temp = `OPInitial;
+    reg `REGNUM d4_temp[0:1];
+    reg `REGNUM s4_temp[0:1];
+    reg `STATE sn4_temp[0:1];
+    reg data_was_reading[0:1];
 
     reg `REGNUM fetch_d;
     reg `REGNUM fetch_s;
@@ -156,82 +159,81 @@ module processor(halt, reset, clk);
     // Stage 1
     always @(posedge clk) begin
         // Get next instruction.
-      if(!stalled[thread]/* & !inst_read_stall[thread] & !data_read_stall[thread]*/) begin
-
+      if(!stalled[thread] & !inst_read_stall[thread] & !data_reading[thread]) begin
         if (pc_check[thread]) begin
             pc[thread] <= pc_jump[thread]+1; //if we need to jump, set the pc accordingly
             //get rid of the ir and sn_stage2 setting
             ir[thread] <= m[{thread, pc_jump[thread]}]; // use the provided pc_jump which should point where our next instruction is
-            //need to make sure we don't do the two above reads if we're waiting on memory
-            // a = {thread, pc_jump[thread]}
-            // h(a) = a`Hash;
-            // line = inst_cache[h(a)]
-            // hit_check = line`Addr
-            //if(inst_cache[{thread,pc_jump[thread]}`Hash]`Addr == {thread, pc_jump[thread]}) begin
-                //ir[thread] <= inst_cache[{thread,pc_jump[thread]}`Hash];
-                //sn_stage2 <= { (inst_cache[{thread,pc_jump[thread]}`Hash] `Opcode), ((inst_cache[{thread,pc_jump[thread]}`Hash] `Opcode == 0) ? inst_cache[{thread,pc_jump[thread]}`Hash][3:0] : 4'b0) };
-            //else
-                //if(data_reading == 0) begin
-                    //inst_reading = 1;
-                    //inst_read_stall = 1;
-                    //rnotw = 1;
-                    //addr = {thread, pc_jump[thread]};
-                    //set the strobe to 1?
-                    //inst_cache_addr[thread] <= {thread,pc_jump[thread]}`Hash;
-                //else
-                    //inst_read_stall = 1;
-            //end
-            sn_stage2 <= { (m[{thread, pc_jump[thread]}] `Opcode), ((m[{thread, pc_jump[thread]}] `Opcode == 0) ? m[{thread, pc_jump[thread]}][3:0] : 4'b0) };
-        end
+            if(inst_cache[{thread,pc_jump[thread]}`Hash]`Addr == {thread, pc_jump[thread]}) begin
+                ir[thread] <= inst_cache[{thread,pc_jump[thread]}`Hash];
+                sn_stage2 <= { (inst_cache[{thread,pc_jump[thread]}`Hash] `Opcode), ((inst_cache[{thread,pc_jump[thread]}`Hash] `Opcode == 0) ? inst_cache[{thread,pc_jump[thread]}`Hash][3:0] : 4'b0) };
+            end
+            else begin
+                if(data_reading[thread] == 0) begin
+                    inst_reading[thread] <= 1;
+                    inst_read_stall[thread] <= 1;
+                    rnotw[thread] <= 1;
+                    addr[thread] <= {thread, pc_jump[thread]};
+                    strobe[thread] <= 1;
+                    inst_cache_addr[thread] <= {thread,pc_jump[thread]}`Hash;
+                end
+                else inst_read_stall[thread] <= 1;
+            end
+        end //if(pc_check)
         else begin
             pc[thread] <= pc[thread] + 1;
-            //if(inst_cache[{thread,pc[thread]}`Hash]`Addr == {thread, pc[thread]}) begin
-                //ir[thread] <= inst_cache[{thread,pc[thread]}`Hash];
-                //sn_stage2 <= { (inst_cache[{thread,pc[thread]}`Hash] `Opcode), ((inst_cache[{thread,pc[thread]}`Hash] `Opcode == 0) ? inst_cache[{thread,pc[thread]}`Hash][3:0] : 4'b0) };
-            //else begin
-                //if(data_reading == 0) begin
-                    //inst_reading = 1;
-                    //inst_read_stall = 1;
-                    //rnotw = 1;
-                    //addr = {thread, pc[thread]};
-                    //set the strobe to 1?
-                    //inst_cache_addr[thread] <= {thread,pc[thread]}`Hash;
-                //else
-                    //inst_read_stall = 1;
-            //end
-            ir[thread] <= m[{thread, pc[thread]}];
-            sn_stage2 <= { (m[{thread, pc[thread]}] `Opcode), ((m[{thread, pc[thread]}] `Opcode == 0) ? m[{thread, pc[thread]}][3:0] : 4'b0) };
+            if(inst_cache[{thread,pc[thread]}`Hash]`Addr == {thread, pc[thread]}) begin
+                ir[thread] <= inst_cache[{thread,pc[thread]}`Hash];
+                sn_stage2 <= { (inst_cache[{thread,pc[thread]}`Hash] `Opcode), ((inst_cache[{thread,pc[thread]}`Hash] `Opcode == 0) ? inst_cache[{thread,pc[thread]}`Hash][3:0] : 4'b0) };
+            end
+            else begin
+                if(data_reading[thread] == 0) begin
+                    inst_reading[thread] <= 1;
+                    inst_read_stall[thread] <= 1;
+                    rnotw[thread] <= 1;
+                    addr[thread] <= {thread, pc[thread]};
+                    strobe[thread] <= 1;
+                    inst_cache_addr[thread] <= {thread,pc[thread]};
+                end
+                else begin
+                    inst_read_stall[thread] <= 1;
+                end
+            end
+            //ir[thread] <= m[{thread, pc[thread]}];
+            //sn_stage2 <= { (m[{thread, pc[thread]}] `Opcode), ((m[{thread, pc[thread]}] `Opcode == 0) ? m[{thread, pc[thread]}][3:0] : 4'b0) };
 
         end
       end
-      //else if(inst_read_stall == 1) begin
-          //if(inst_reading = 1) begin
-              //if(mfc == 1) begin
-                  //ir[thread] <= rdata;
-                  //sn_stage2<= { (rdata `Opcode), ((rdata ? rdata : 4'b0) };
-                  //inst_cache[inst_cache_addr[thread]] <= {{thread, pc_jump[thread]} [9:0], rdata, 000000 };
-                  //inst_reading = 0;
-                  //inst_read_stall = 0;
-              //else begin
-                  //ir[thread] <= {8'hff, `OPInitial};
-                  //sn_stage2 <= `OPInitial;
-              //end
-          //else begin
-              //if(data_reading == 0) begin
-                  //inst_reading = 1;
-                  //rnotw = 1;
-                  //addr = {thread, pc_jump[thread]};
-                  //set the strobe to 1?
-                  //inst_cache_addr[thread] <= {thread,pc_jump[thread]}`Hash;
-              //end
-              //ir[thread] <= {8'hff, `OPInitial};
-              //sn_stage2 <= `OPInitial;
-          //end
-      //end
-      //else if(data_read_stall[thread] == 1) begin
-        //ir[thread] <= {8'hff, `OPInitial};
-        //sn_stage2 <= `OPInitial;
-      //end
+      else if(inst_read_stall[thread] == 1) begin
+          if(inst_reading[thread] == 1) begin
+              if(mfc[thread] == 1) begin
+                  ir[thread] <= rdata[thread];
+                  sn_stage2 <= { (rdata[thread] `Opcode), (rdata[thread] ? rdata[thread] : 4'b0) };
+                  inst_cache[inst_cache_addr[thread]] <= {addr[thread][9:0], rdata[thread], 6'b000000 }; //addr probably needs to be something else, that might not still have the address we want
+                  inst_reading[thread] <= 0;
+                  inst_read_stall[thread] <= 0;
+              end
+              else begin
+                  ir[thread] <= {8'hff, `OPInitial};
+                  sn_stage2 <= `OPInitial;
+              end
+          end
+          else begin
+              if(data_reading[thread] == 0) begin
+                  inst_reading[thread] <= 1;
+                  rnotw[thread] <= 1;
+                  addr[thread] <= {thread, pc_jump[thread]};
+                  strobe[thread] <= 1;
+                  inst_cache_addr[thread] <= {thread,pc_jump[thread]}`Hash;
+              end
+              ir[thread] <= {8'hff, `OPInitial};
+              sn_stage2 <= `OPInitial;
+          end
+      end
+      else if(data_reading[thread] == 1) begin
+        ir[thread] <= {8'hff, `OPInitial};
+        sn_stage2 <= `OPInitial;
+      end
       else begin
         ir[thread] <= {8'hff, `OPInitial};
         sn_stage2 <= `OPInitial;
@@ -461,103 +463,126 @@ module processor(halt, reset, clk);
             end
 
         endcase
-        //if(!data_reading) begin
-          sn_stage4 <= sn_stage3;
-          d_stage4 <= d_stage3;
-          s_stage4 <= s_stage3;
-          //end
-        //else begin
-          //sn4_temp <= sn_stage3;
-          //d4_temp <= d_stage3;
-          //s4_temp <= s_stage3
-        //end
+        //check if data is currently being read
+        if(!data_reading[thread]) begin
+          if(data_was_reading[thread]) begin //if not check if it was being read (so we need to send the state we've saved)
+              sn_stage4 <= sn4_temp[thread];
+              d_stage4 <= d4_temp[thread];
+              s_stage4 <= s4_temp[thread]; 
+              data_was_reading[thread] <= 0;
+          end
+          else begin
+              sn_stage4 <= sn_stage3;
+              d_stage4 <= d_stage3;
+              s_stage4 <= s_stage3;
+          end
+        end
+        else begin
+          sn4_temp[thread] <= sn_stage3;
+          d4_temp[thread] <= d_stage3;
+          s4_temp[thread] <= s_stage3;
+          data_was_reading[thread] <= 1;
+        end
     end
 
     // Stage 4
     always @(posedge clk) begin
-        //if(!data_reading)
-        case(sn_stage4)
-            `OPAdd: begin
-                r[{!thread, d_stage4}] <= fetch_d + fetch_s;
-                //$display("Add Stage 4 !thread %b", !thread);
-            end
-            `OPSub: begin
-                r[{!thread, d_stage4}] <= fetch_d - fetch_s;
-            end
-            `OPTest: begin
-                torf[!thread] <= (fetch_s != 0);
-                //$display("test stage 4");
-            end
-            `OPLt: begin
-                r[{!thread, d_stage4}] <= (fetch_d < fetch_s);
-            end
-            `OPDup: begin
-                r[{!thread, d_stage4}] <= fetch_s;
-            end
-            `OPAnd: begin
-                r[{!thread, d_stage4}] <= fetch_d & fetch_s;
-                //$display("And Stage 4 !thread %b", !thread);
-            end
-            `OPOr: begin
-                r[{!thread, d_stage4}] <= fetch_d | fetch_s;
-            end
-            `OPXor: begin
-                r[{!thread, d_stage4}] <= fetch_d ^ fetch_s;
-            end
-            `OPLoad: begin
-                //will have to set flag to denote memory is being read
-                //probably have to stop the states in this thread (behind the current stage) from
-                //continuing while that flag is up
-                //then need to determine priority, can set another flag to denote that the
-                //instruction read has been canceled for this read, then have stage 1 wait till
-                //the read is finished to redo its read
-                r[{!thread, d_stage4}] <= m[fetch_d];
-            end
-            `OPStore: begin
-                m[{!thread, fetch_d}] <= fetch_s;
-                r[{!thread, d_stage4}] <= fetch_s;
-            end
-            `OPRet: begin
-                //pc_check[!thread] <= 1;
-                //pc_jump[!thread] <= fetch_s;
-            end
-            `OPPush: begin
-                //$display("Push Stage 4 write = %b", { (preit[!thread] ? pre[!thread] : { 4 { fetch_word[11] } } ), fetch_word`Immed });
-                r[{!thread, d_stage4}] <= { (preit[!thread] ? pre[!thread] : { 4 { fetch_word[11] } } ), fetch_word`Immed };
-                preit <= 0;
+     if(!data_reading[!thread]) begin
+          case(sn_stage4)
+              `OPAdd: begin
+                  r[{!thread, d_stage4}] <= fetch_d + fetch_s;
+                  //$display("Add Stage 4 !thread %b", !thread);
+              end
+              `OPSub: begin
+                  r[{!thread, d_stage4}] <= fetch_d - fetch_s;
+              end
+              `OPTest: begin
+                  torf[!thread] <= (fetch_s != 0);
+                  //$display("test stage 4");
+              end
+              `OPLt: begin
+                  r[{!thread, d_stage4}] <= (fetch_d < fetch_s);
+              end
+              `OPDup: begin
+                  r[{!thread, d_stage4}] <= fetch_s;
+              end
+              `OPAnd: begin
+                  r[{!thread, d_stage4}] <= fetch_d & fetch_s;
+                  //$display("And Stage 4 !thread %b", !thread);
+              end
+              `OPOr: begin
+                  r[{!thread, d_stage4}] <= fetch_d | fetch_s;
+              end
+              `OPXor: begin
+                  r[{!thread, d_stage4}] <= fetch_d ^ fetch_s;
+              end
+              `OPLoad: begin
+                  //will have to set flag to denote memory is being read
+                  if(data_cache[fetch_d`Hash]`Addr == fetch_d) begin
+                      r[{!thread, d_stage4}] <= m[fetch_d`Hash];
+                  end
+                  else begin
+                      data_reading[!thread] <= 1;
+                      if(inst_reading[!thread]) data_trumps_inst[!thread] <= 1;
+                      rnotw[!thread] <= 1;
+                      addr[!thread] <= fetch_d;
+                      strobe[!thread] <= 1;
+                      data_cache_addr[!thread] <= fetch_d`Hash;
 
-            end
-            `OPCall: begin
-                r[{!thread, d_stage4}] <= fetch_word; //CHANGE back to + 1
-                preit <= 0;
 
+                  end
+                  //r[{!thread, d_stage4}] <= m[fetch_d];
+              end
+              `OPStore: begin
+                  m[{!thread, fetch_d}] <= fetch_s;
+                  r[{!thread, d_stage4}] <= fetch_s;
+              end
+              `OPRet: begin
+              end
+              `OPPush: begin
+                  r[{!thread, d_stage4}] <= { (preit[!thread] ? pre[!thread] : { 4 { fetch_word[11] } } ), fetch_word`Immed };
+                  preit <= 0;
+
+              end
+              `OPCall: begin
+                  r[{!thread, d_stage4}] <= fetch_word; 
+                  preit <= 0;
+
+              end
+              `OPJump: begin preit <= 0; end
+              `OPJumpT: begin preit <= 0; end
+              `OPJumpF: begin preit <= 0; end
+              `OPGet: begin
+                  r[{!thread, d_stage4}] <= fetch_s;
+              end
+              `OPPut: begin
+                  r[{!thread, d_stage4}] <= fetch_s;
+              end
+              `OPPop: begin end
+              `OPPre: begin
+                  preit[!thread] <= 1;
+              end
+              `OPInitial: begin
+              end
+              default: begin
+                  halt[!thread] <= 1;
+              end
+        endcase
+      end
+      else begin
+        if(mfc[thread]) begin
+            if(data_cache[data_cache_addr[!thread]]`Dirty) begin
+                rnotw[!thread] <=1;
+                strobe[!thread] <= 1;
+                wdata[!thread] <= data_cache[data_cache_addr[!thread]]`Data;
+                addr[!thread] <= data_cache[data_cache_addr[!thread]]`Addr;
             end
-            `OPJump: begin preit <= 0; end
-            `OPJumpT: begin preit <= 0; end
-            `OPJumpF: begin preit <= 0; end
-            `OPGet: begin
-                r[{!thread, d_stage4}] <= fetch_s;
-            end
-            `OPPut: begin
-                r[{!thread, d_stage4}] <= fetch_s;
-            end
-            `OPPop: begin end
-            `OPPre: begin
-                preit[!thread] <= 1;
-            end
-            `OPInitial: begin
-            end
-            default: begin
-                halt[!thread] <= 1;
-                //$display("halt stage 4");
-            end
-      endcase
-      //else
-        //check mfc
-        //if the read is done then write that data to the cache (at h(a)) write to main mem if value is dirty
-        //get the next state from the _temp registers
-        //set flags (data_reading)
-    end
+            data_cache[data_cache_addr[!thread]] <= {addr[thread] [9:0], rdata[!thread], 6'b000000}; //addr probably needs to be something else, that might not still have the address we want
+            r[{!thread, d_stage4}] <= rdata[!thread];
+            data_reading[thread] <= 0;
+        end
+      end
+  end
 endmodule
 
 
