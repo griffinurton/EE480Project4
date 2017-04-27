@@ -67,23 +67,34 @@ module processor(halt, reset, clk);
     reg `LINESIZE inst_cache `CACHESIZE;
 
     //main slow memory
-    wire mfc[0:1];
-    wire `WORD rdata[0:1];
-    reg `WORD addr[0:1];
-    reg `WORD wdata[0:1];
-    reg rnotw[0:1];
-    reg strobe[0:1];
-    slowmem Mem0(mfc[0], rdata[0], addr[0], wdata[0], rnotw[0], strobe[0], clk);
-    slowmem Mem1(mfc[1], rdata[1], addr[1], wdata[1], rnotw[1], strobe[1], clk);
+    wire mfc;
+    wire `WORD rdata;
+    reg `WORD addr;
+    reg `WORD wdata;
+    reg rnotw;
+    reg strobe;
+    slowmem Mem1(mfc, rdata, addr, wdata, rnotw, strobe, clk);
 
+    reg data_rnotw;
+    reg `WORD data_wdata;
+    reg inst_rnotw;
+    
+    reg inst_thread; //denotes which thread the current inst read is for
+    reg data_thread; //denotes which thread the current data read is for
     //flags dealing with memory
     reg data_trumps_inst[0:1]; //denotes if the data_cache has invoked priority over the inst_cache
-    reg data_reading[0:1]; //we are waiting for slowmem to finish reading for the data_cache
-    reg inst_reading[0:1]; //we are waiting for slowmem to finish reading for the inst_cache
+    reg data_reading; //we are waiting for slowmem to finish reading for the data_cache
+    reg inst_reading; //we are waiting for slowmem to finish reading for the inst_cache
+    reg data_writing; 
     reg inst_read_stall[0:1];
+    reg data_read_stall[0:1];
+    reg `WORD data_read_dest[0:1];
     reg `WORD pc_read[0:1];
-    reg `CACHEADDRSIZE inst_cache_addr [0:1];
+    reg `WORD inst_addr;
+    reg `WORD data_addr;
+    reg `WORD write_addr;
     reg `CACHEADDRSIZE data_cache_addr [0:1];
+    reg `CACHEADDRSIZE inst_cache_addr [0:1];
     // The program counter, instruction register, state number,
     // and stack pointer.
     reg `WORD pc [0:1];
@@ -135,7 +146,7 @@ module processor(halt, reset, clk);
         ir[0] <= `OPInitial;
         ir[1] <= `OPInitial;
         $readmemh0(r);
-        $readmemh1(m);
+      //  $readmemh1(m);
         thread <= 0;
     end
 
@@ -154,30 +165,57 @@ module processor(halt, reset, clk);
         // FIFO / FILO (with dirty line preference)
         // Least frequently touched
         // Least recently touched
+    reg data_read_started;
+    reg inst_read_started;
+    reg data_write_started;
+    //memory control block
+    always @(posedge clk) begin
+        if(data_reading & !data_read_started) begin
+            rnotw <= data_rnotw;
+            addr <= data_addr;
+            strobe <=1;
+            data_read_started <= 1;
+        end
+        else if(!data_reading & inst_reading & !inst_read_started) begin
+            rnotw <= inst_rnotw;
+            addr <= inst_addr;
+            strobe <= 1;
+            inst_read_started <= 1;
+        end
+        else if(data_writing & !data_write_started) begin
+            rnotw <= 0;
+            wdata <= data_wdata;
+            addr <= write_addr;
+            data_write_started <= 1;
+        end
 
-
+        if(mfc) begin
+            if(data_read_started) data_read_started <= 0;
+            else if(inst_read_started) inst_read_started <= 0;
+            else if(data_write_started) data_write_started <= 0;
+        end
+    end
     // Stage 1
     always @(posedge clk) begin
-        // Get next instruction.
-      if(!stalled[thread] & !inst_read_stall[thread] & !data_reading[thread]) begin
+      if(!stalled[thread] & !(inst_reading & (inst_thread == thread)) & !(data_reading & (data_thread == thread))) begin
         if (pc_check[thread]) begin
             pc[thread] <= pc_jump[thread]+1; //if we need to jump, set the pc accordingly
-            //get rid of the ir and sn_stage2 setting
-            ir[thread] <= m[{thread, pc_jump[thread]}]; // use the provided pc_jump which should point where our next instruction is
             if(inst_cache[{thread,pc_jump[thread]}`Hash]`Addr == {thread, pc_jump[thread]}) begin
                 ir[thread] <= inst_cache[{thread,pc_jump[thread]}`Hash];
                 sn_stage2 <= { (inst_cache[{thread,pc_jump[thread]}`Hash] `Opcode), ((inst_cache[{thread,pc_jump[thread]}`Hash] `Opcode == 0) ? inst_cache[{thread,pc_jump[thread]}`Hash][3:0] : 4'b0) };
             end
             else begin
-                if(data_reading[thread] == 0) begin
-                    inst_reading[thread] <= 1;
-                    inst_read_stall[thread] <= 1;
-                    rnotw[thread] <= 1;
-                    addr[thread] <= {thread, pc_jump[thread]};
-                    strobe[thread] <= 1;
-                    inst_cache_addr[thread] <= {thread,pc_jump[thread]}`Hash;
+                inst_read_stall[thread] <= 1; //signifies that we're not doing anything else until our read is finished
+                inst_addr[thread] <= {thread,pc_jump[thread]}; //we need to go ahead and save the address we want
+                if(data_reading == 0 & inst_reading == 0) begin //if no one else is reading, setup the read, otherwise we will start waiting with the inst_read_stall flag
+                    inst_reading <= 1;
+                    inst_thread <= thread;
+                    rnotw <= 1;
+                    addr <= {thread, pc_jump[thread]};
+                    strobe <= 1;
                 end
-                else inst_read_stall[thread] <= 1;
+                ir[thread] <= {8'hff, `OPInitial};
+                sn_stage2 <= `OPInitial;
             end
         end //if(pc_check)
         else begin
@@ -187,50 +225,58 @@ module processor(halt, reset, clk);
                 sn_stage2 <= { (inst_cache[{thread,pc[thread]}`Hash] `Opcode), ((inst_cache[{thread,pc[thread]}`Hash] `Opcode == 0) ? inst_cache[{thread,pc[thread]}`Hash][3:0] : 4'b0) };
             end
             else begin
-                if(data_reading[thread] == 0) begin
-                    inst_reading[thread] <= 1;
-                    inst_read_stall[thread] <= 1;
-                    rnotw[thread] <= 1;
-                    addr[thread] <= {thread, pc[thread]};
-                    strobe[thread] <= 1;
-                    inst_cache_addr[thread] <= {thread,pc[thread]};
+                inst_addr[thread] <= {thread,pc[thread]};
+                inst_read_stall[thread] <= 1;
+                if(data_reading == 0 & inst_reading == 0) begin
+                    inst_reading <= 1;
+                    rnotw <= 1;
+                    addr <= {thread, pc[thread]};
+                    strobe <= 1;
+                    inst_thread <= thread;
                 end
-                else begin
-                    inst_read_stall[thread] <= 1;
-                end
+                ir[thread] <= {8'hff, `OPInitial};
+                sn_stage2 <= `OPInitial;
             end
-            //ir[thread] <= m[{thread, pc[thread]}];
-            //sn_stage2 <= { (m[{thread, pc[thread]}] `Opcode), ((m[{thread, pc[thread]}] `Opcode == 0) ? m[{thread, pc[thread]}][3:0] : 4'b0) };
-
         end
       end
-      else if(inst_read_stall[thread] == 1) begin
-          if(inst_reading[thread] == 1) begin
-              if(mfc[thread] == 1) begin
+      else if(!stalled[thread] & inst_read_stall[thread] & (inst_thread == thread)) begin //this means this thread wants to read and it is its turn to read
+          if(inst_reading & !data_reading) begin //this means we are currently reading from slowmem
+              if(mfc == 1) begin //READ COMPLETE
                   ir[thread] <= rdata[thread];
                   sn_stage2 <= { (rdata[thread] `Opcode), (rdata[thread] ? rdata[thread] : 4'b0) };
-                  inst_cache[inst_cache_addr[thread]] <= {addr[thread][9:0], rdata[thread], 6'b000000 }; //addr probably needs to be something else, that might not still have the address we want
-                  inst_reading[thread] <= 0;
+                  inst_cache[inst_addr[thread]`Hash] <= {inst_addr[thread][9:0], rdata[thread], 6'b000000 }; //TODO: addr probably needs to be something else, that might not still have the address we want
+                  inst_reading <= 0;
                   inst_read_stall[thread] <= 0;
               end
-              else begin
+              else begin //we are still reading, send NOPS
                   ir[thread] <= {8'hff, `OPInitial};
                   sn_stage2 <= `OPInitial;
               end
           end
-          else begin
-              if(data_reading[thread] == 0) begin
-                  inst_reading[thread] <= 1;
-                  rnotw[thread] <= 1;
-                  addr[thread] <= {thread, pc_jump[thread]};
-                  strobe[thread] <= 1;
-                  inst_cache_addr[thread] <= {thread,pc_jump[thread]}`Hash;
+          else begin //this means we are waiting behind a data read
+              if(data_reading == 0) begin //this means the data read we were waiting on is over, now we do our read
+                  inst_reading <= 1;
+                  rnotw <= 1;
+                  addr <= {thread, pc_jump[thread]};
+                  strobe <= 1;
               end
-              ir[thread] <= {8'hff, `OPInitial};
+              ir[thread] <= {8'hff, `OPInitial}; //either we are still waiting or we just started. Either way, send a NOP
               sn_stage2 <= `OPInitial;
           end
       end
-      else if(data_reading[thread] == 1) begin
+      else if (!stalled[thread] & inst_read_stall[thread] & (inst_thread != thread)) begin //this means we are waiting behind a inst_read, but it's on the other thread
+        if(!inst_reading & !data_reading) begin //this means neither is reading, so it must be our turn
+          inst_reading <= 1;
+          inst_thread <= thread;
+          rnotw <= 1;
+          addr <= {thread, pc_jump[thread]};
+          strobe <= 1;
+          inst_addr <= {thread,pc_jump[thread]};
+        end
+        ir[thread] <= {8'hff, `OPInitial};
+        sn_stage2 <= `OPInitial;
+      end
+      else if(!stalled[thread] & data_reading & (data_thread == thread)) begin //this means there is a data read going on, we need to send NOPS down the pipe (i think)
         ir[thread] <= {8'hff, `OPInitial};
         sn_stage2 <= `OPInitial;
       end
@@ -299,6 +345,8 @@ module processor(halt, reset, clk);
             end
             `OPLoad: begin
                 d_stage3 <= sp[!thread];
+                stalled[!thread] <= 1; //makes things easier if the instruction following a load is a NOP
+              //  read_stall[!thread] <= 1; //we might have to have multiple nops, this signifies that
                 $display("Load thread %b", !thread);
             end
             `OPStore: begin
@@ -464,12 +512,13 @@ module processor(halt, reset, clk);
 
         endcase
         //check if data is currently being read
-        if(!data_reading[thread]) begin
-          if(data_was_reading[thread]) begin //if not check if it was being read (so we need to send the state we've saved)
+        /*
+        if(!data_reading) begin
+          if(data_was_reading) begin //if not check if it was being read (so we need to send the state we've saved)
               sn_stage4 <= sn4_temp[thread];
               d_stage4 <= d4_temp[thread];
-              s_stage4 <= s4_temp[thread]; 
-              data_was_reading[thread] <= 0;
+              s_stage4 <= s4_temp[thread];
+              data_was_reading <= 0;
           end
           else begin
               sn_stage4 <= sn_stage3;
@@ -477,17 +526,20 @@ module processor(halt, reset, clk);
               s_stage4 <= s_stage3;
           end
         end
-        else begin
+        else if(data_thread == thread) begin
           sn4_temp[thread] <= sn_stage3;
           d4_temp[thread] <= d_stage3;
           s4_temp[thread] <= s_stage3;
-          data_was_reading[thread] <= 1;
+          data_was_reading <= 1;
         end
+        */
     end
 
     // Stage 4
     always @(posedge clk) begin
-     if(!data_reading[!thread]) begin
+     if(data_writing) data_writing <= 0;
+
+     if(data_read_stall[!thread]) begin //this thread wants to be reading
           case(sn_stage4)
               `OPAdd: begin
                   r[{!thread, d_stage4}] <= fetch_d + fetch_s;
@@ -518,24 +570,24 @@ module processor(halt, reset, clk);
               end
               `OPLoad: begin
                   //will have to set flag to denote memory is being read
-                  if(data_cache[fetch_d`Hash]`Addr == fetch_d) begin
-                      r[{!thread, d_stage4}] <= m[fetch_d`Hash];
-                  end
-                  else begin
-                      data_reading[!thread] <= 1;
-                      if(inst_reading[!thread]) data_trumps_inst[!thread] <= 1;
-                      rnotw[!thread] <= 1;
-                      addr[!thread] <= fetch_d;
-                      strobe[!thread] <= 1;
-                      data_cache_addr[!thread] <= fetch_d`Hash;
-
-
+                  data_read_stall[!thread] <= 1;
+                  data_cache_addr[!thread] <= fetch_d;
+                  data_read_dest[!thread] <= {!thread, d_stage4};
+                  if(!data_reading) begin //there isn't a data read already going on, so we should go ahead and start reading
+                      data_reading <= 1;
+                      data_thread <= !thread;
+                      data_rnotw <= 1;
+                      data_addr <= fetch_d;
                   end
                   //r[{!thread, d_stage4}] <= m[fetch_d];
               end
               `OPStore: begin
-                  m[{!thread, fetch_d}] <= fetch_s;
-                  r[{!thread, d_stage4}] <= fetch_s;
+                  //m[{!thread, fetch_d}] <= fetch_s;
+                  data_rnotw <= 0;
+                  data_writing <= 1;
+                  data_wdata <= fetch_s;
+                  data_addr <= {!thread, d_stage4};
+                  //r[{!thread, d_stage4}] <= fetch_s;
               end
               `OPRet: begin
               end
@@ -545,7 +597,7 @@ module processor(halt, reset, clk);
 
               end
               `OPCall: begin
-                  r[{!thread, d_stage4}] <= fetch_word; 
+                  r[{!thread, d_stage4}] <= fetch_word;
                   preit <= 0;
 
               end
@@ -569,19 +621,30 @@ module processor(halt, reset, clk);
               end
         endcase
       end
-      else begin
-        if(mfc[thread]) begin
-            if(data_cache[data_cache_addr[!thread]]`Dirty) begin
-                rnotw[!thread] <=1;
-                strobe[!thread] <= 1;
-                wdata[!thread] <= data_cache[data_cache_addr[!thread]]`Data;
-                addr[!thread] <= data_cache[data_cache_addr[!thread]]`Addr;
+     else if(data_read_stall[!thread] & data_thread == !thread) begin //there is currently a data read out
+        if(mfc) begin //READ COMPLETE
+            r[data_read_dest[!thread]] <= rdata;
+            //have to deal with the possibility of the line being dirty
+            //(just do the write shouldn't be able to have a write overlap)
+            if(data_cache[data_addr`Hash]`Dirty) begin
+                data_rnotw <= 0;
+                data_writing <= 1;
+                data_wdata <= data_cache[data_addr`Hash]`Data;
+                write_addr <= data_addr;
             end
-            data_cache[data_cache_addr[!thread]] <= {addr[thread] [9:0], rdata[!thread], 6'b000000}; //addr probably needs to be something else, that might not still have the address we want
-            r[{!thread, d_stage4}] <= rdata[!thread];
-            data_reading[thread] <= 0;
+            data_cache[data_addr`Hash] <= {data_addr[9:0], rdata, 6'b000000};
+            data_read_stall[!thread] <= 0;
+            data_reading <= 0;
         end
-      end
+     end
+     else if(data_read_stall[!thread] & data_thread != !thread) begin //means that the current read is on the other thread
+        if(!data_reading) begin //the read that was going has finished, so we should be good to start
+            data_reading <= 1;
+            data_thread <= !thread;
+            data_rnotw <= 1;
+            data_addr <= data_cache_addr[!thread];
+        end
+     end
   end
 endmodule
 
@@ -601,7 +664,9 @@ reg `WORD m `MEMSIZE;
 
 initial begin
   pend <= 0;
+
   // put your memory initialization code here
+  $readmemh1(m);
 end
 
 always @(posedge clk) begin
