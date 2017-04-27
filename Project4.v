@@ -76,16 +76,17 @@ module processor(halt, reset, clk);
     slowmem Mem1(mfc, rdata, addr, wdata, rnotw, strobe, clk);
 
     reg data_rnotw;
+
     reg `WORD data_wdata;
     reg inst_rnotw;
-    
+
     reg inst_thread; //denotes which thread the current inst read is for
     reg data_thread; //denotes which thread the current data read is for
     //flags dealing with memory
     reg data_trumps_inst[0:1]; //denotes if the data_cache has invoked priority over the inst_cache
     reg data_reading; //we are waiting for slowmem to finish reading for the data_cache
     reg inst_reading; //we are waiting for slowmem to finish reading for the inst_cache
-    reg data_writing; 
+    reg data_writing;
     reg inst_read_stall[0:1];
     reg data_read_stall[0:1];
     reg `WORD data_read_dest[0:1];
@@ -145,6 +146,12 @@ module processor(halt, reset, clk);
         sn_stage4 <= `OPInitial;
         ir[0] <= `OPInitial;
         ir[1] <= `OPInitial;
+        inst_thread <= 0;
+        data_thread <= 0;
+        inst_reading <= 0;
+        data_reading <= 0;
+        inst_read_started <= 0;
+        data_read_started <= 0;
         $readmemh0(r);
       //  $readmemh1(m);
         thread <= 0;
@@ -171,13 +178,14 @@ module processor(halt, reset, clk);
     //memory control block
     always @(posedge clk) begin
         if(data_reading & !data_read_started) begin
-            rnotw <= data_rnotw;
+            rnotw <= 1;
             addr <= data_addr;
             strobe <=1;
             data_read_started <= 1;
         end
         else if(!data_reading & inst_reading & !inst_read_started) begin
-            rnotw <= inst_rnotw;
+            $display("doing the reading: adr = %b, rnotw = %b", inst_addr, inst_rnotw);
+            rnotw <= 1;
             addr <= inst_addr;
             strobe <= 1;
             inst_read_started <= 1;
@@ -188,8 +196,9 @@ module processor(halt, reset, clk);
             addr <= write_addr;
             data_write_started <= 1;
         end
-
+        $display("mfc = ", mfc);
         if(mfc) begin
+            $display("mem fetch complete");
             if(data_read_started) data_read_started <= 0;
             else if(inst_read_started) inst_read_started <= 0;
             else if(data_write_started) data_write_started <= 0;
@@ -200,6 +209,7 @@ module processor(halt, reset, clk);
       if(!stalled[thread] & !(inst_reading & (inst_thread == thread)) & !(data_reading & (data_thread == thread))) begin
         if (pc_check[thread]) begin
             pc[thread] <= pc_jump[thread]+1; //if we need to jump, set the pc accordingly
+            $display(inst_cache[{thread,pc_jump[thread]}`Hash]`Addr == {thread, pc_jump[thread]});
             if(inst_cache[{thread,pc_jump[thread]}`Hash]`Addr == {thread, pc_jump[thread]}) begin
                 ir[thread] <= inst_cache[{thread,pc_jump[thread]}`Hash];
                 sn_stage2 <= { (inst_cache[{thread,pc_jump[thread]}`Hash] `Opcode), ((inst_cache[{thread,pc_jump[thread]}`Hash] `Opcode == 0) ? inst_cache[{thread,pc_jump[thread]}`Hash][3:0] : 4'b0) };
@@ -210,9 +220,9 @@ module processor(halt, reset, clk);
                 if(data_reading == 0 & inst_reading == 0) begin //if no one else is reading, setup the read, otherwise we will start waiting with the inst_read_stall flag
                     inst_reading <= 1;
                     inst_thread <= thread;
-                    rnotw <= 1;
-                    addr <= {thread, pc_jump[thread]};
-                    strobe <= 1;
+                    inst_rnotw <= 1;
+                    inst_addr <= {thread, pc_jump[thread]};
+                    $display("Instruction reading");
                 end
                 ir[thread] <= {8'hff, `OPInitial};
                 sn_stage2 <= `OPInitial;
@@ -228,10 +238,10 @@ module processor(halt, reset, clk);
                 inst_addr[thread] <= {thread,pc[thread]};
                 inst_read_stall[thread] <= 1;
                 if(data_reading == 0 & inst_reading == 0) begin
+                    $display("first read: addr = ", {thread, pc[thread]});
                     inst_reading <= 1;
-                    rnotw <= 1;
-                    addr <= {thread, pc[thread]};
-                    strobe <= 1;
+                    inst_rnotw <= 1;
+                    inst_addr <= {thread, pc[thread]};
                     inst_thread <= thread;
                 end
                 ir[thread] <= {8'hff, `OPInitial};
@@ -249,6 +259,7 @@ module processor(halt, reset, clk);
                   inst_read_stall[thread] <= 0;
               end
               else begin //we are still reading, send NOPS
+                  $display("sending nops");
                   ir[thread] <= {8'hff, `OPInitial};
                   sn_stage2 <= `OPInitial;
               end
@@ -256,9 +267,8 @@ module processor(halt, reset, clk);
           else begin //this means we are waiting behind a data read
               if(data_reading == 0) begin //this means the data read we were waiting on is over, now we do our read
                   inst_reading <= 1;
-                  rnotw <= 1;
-                  addr <= {thread, pc_jump[thread]};
-                  strobe <= 1;
+                  inst_rnotw <= 1;
+                  inst_addr <= {thread, pc_jump[thread]};
               end
               ir[thread] <= {8'hff, `OPInitial}; //either we are still waiting or we just started. Either way, send a NOP
               sn_stage2 <= `OPInitial;
@@ -268,9 +278,7 @@ module processor(halt, reset, clk);
         if(!inst_reading & !data_reading) begin //this means neither is reading, so it must be our turn
           inst_reading <= 1;
           inst_thread <= thread;
-          rnotw <= 1;
-          addr <= {thread, pc_jump[thread]};
-          strobe <= 1;
+          inst_rnotw <= 1;
           inst_addr <= {thread,pc_jump[thread]};
         end
         ir[thread] <= {8'hff, `OPInitial};
@@ -705,15 +713,13 @@ end
 endmodule
 
 
-
-// Testbench (Needs editing)
 module testbench;
 
     reg reset = 0;
     reg clk = 0;
 
     wire [0:1] halted;
-
+    integer a = 0;
     processor PE(halted, reset, clk);
 
     initial begin
@@ -723,9 +729,10 @@ module testbench;
         #10 reset = 1;
         #10 reset = 0;
 
-        while (halted != 2'b11) begin
+        while (halted != 2'b11 & a < 1000) begin
             #10 clk = 1;
             #10 clk = 0;
+            a = a + 1;
         end
 
         $finish;
