@@ -91,7 +91,7 @@ module processor(halt, reset, clk);
     reg data_writing;
     reg inst_read_stall[0:1];
     reg data_read_stall[0:1];
-    reg `WORD data_read_dest[0:1];
+    reg [16:0] data_read_dest[0:1];
     reg `WORD pc_read[0:1];
     reg [16:0] inst_addr[0:1];
     reg [16:0] data_addr[0:1];
@@ -186,6 +186,7 @@ module processor(halt, reset, clk);
     reg reset_reads;
     reg `WORD temp1;
     reg `WORD temp2;
+    reg `WORD cache_data;
 
     always @(posedge clk) begin
       temp1 <= inst_addr[0];
@@ -241,10 +242,11 @@ module processor(halt, reset, clk);
         if (pc_check[thread]) begin
             pc[thread] <= pc_jump[thread]+1; //if we need to jump, set the pc accordingly
             //$display(inst_cache[{thread,pc_jump[thread]}`Hash]`Addr == {thread, pc_jump[thread]});
-            if(inst_cache[{thread,pc_jump[thread]}`Hash]`Addr == {thread, pc_jump[thread]}) begin
-                //$display("hey we got a hit");
-                ir[thread] <= inst_cache[{thread,pc_jump[thread]}`Hash];
-                sn_stage2 <= { (inst_cache[{thread,pc_jump[thread]}`Hash] `Opcode), ((inst_cache[{thread,pc_jump[thread]}`Hash] `Opcode == 0) ? inst_cache[{thread,pc_jump[thread]}`Hash][3:0] : 4'b0) };
+            if((inst_cache[{thread,pc_jump[thread]}`Hash]`Addr&10'h3ff) == ({thread, pc_jump[thread][9:0]}&10'h3ff)) begin
+                $display("hey we got a hit pc_jump: inst_cache = %b", inst_cache[{thread,pc_jump[thread]}`Hash]);
+                ir[thread] <= inst_cache[{thread,pc_jump[thread]}`Hash]`Data;
+                cache_data = inst_cache[{thread,pc_jump[thread]}`Hash]`Data;
+                sn_stage2 <= { (cache_data`Opcode), ((cache_data `Opcode == 0) ? cache_data[3:0] : 4'b0) };
             end
             else begin
                 inst_read_stall[thread] <= 1; //signifies that we're not doing anything else until our read is finished
@@ -261,10 +263,15 @@ module processor(halt, reset, clk);
         else begin
             //$display("incrementing pc: ");
             pc[thread] <= pc[thread] + 1;
-            if(inst_cache[{thread,pc[thread]}`Hash]`Addr == {thread, pc[thread]}) begin
-                ir[thread] <= inst_cache[{thread,pc[thread]}`Hash];
-                sn_stage2 <= { (inst_cache[{thread,pc[thread]}`Hash] `Opcode), ((inst_cache[{thread,pc[thread]}`Hash] `Opcode == 0) ? inst_cache[{thread,pc[thread]}`Hash][3:0] : 4'b0) };
-                $display("hey we got a hit");
+            //$display("checking if hit: left = %b right = %b",inst_cache[{thread,pc[thread]}`Hash]`Addr&10'h3ff,   ({thread, pc[thread][9:0]}&10'h3ff));
+            if((inst_cache[{thread,pc[thread]}`Hash]`Addr&10'h3ff) == ({thread, pc[thread][9:0]}&10'h3ff)) begin
+                ir[thread] <= inst_cache[{thread,pc[thread]}`Hash]`Data;
+                $display("hey we got a hit pc: inst_cache = %b state = %b", inst_cache[{thread,pc[thread]}`Hash]`Data, { (cache_data `Opcode), ((cache_data`Opcode == 0) ? cache_data[3:0] : 4'b0) });
+                $display((inst_cache[{thread,pc[thread]}`Hash]`Data`Opcode));
+                cache_data = inst_cache[{thread,pc[thread]}`Hash]`Data;
+                //sn_stage2 <= { (inst_cache[{thread,pc[thread]}`Hash]`Data `Opcode), (((inst_cache[{thread,pc[thread]}`Hash]`Data`Opcode) == 0) ? (inst_cache[{thread,pc[thread]}`Hash]`Data[3:0]) : (4'b0)) };
+                
+                sn_stage2 <= { (cache_data `Opcode), ((cache_data`Opcode == 0) ? cache_data[3:0] : 4'b0) };
             end
             else begin
                 //$display("writing to addr. thread = %b, addr = %b", thread, {thread, pc[thread]});
@@ -293,8 +300,9 @@ module processor(halt, reset, clk);
           if(inst_reading & !data_reading) begin //this means we are currently reading from slowmem
               if(fetch_complete) begin //READ COMPLETE
                   ir[thread] <= fetch_data;
+                  $display("read complete data = %b state = %b", fetch_data, { (fetch_data `Opcode), ((fetch_data`Opcode == 0) ? fetch_data[3:0] : 4'b0) });
                   sn_stage2 <= { (fetch_data `Opcode), ((fetch_data`Opcode == 0) ? fetch_data[3:0] : 4'b0) };
-                  inst_cache[inst_addr[thread]`Hash] <= {inst_addr[thread][9:0], fetch_data, 6'b000000 }; //TODO: addr probably needs to be something else, that might not still have the address we want
+                  inst_cache[inst_addr[thread]`Hash] <= {inst_addr[thread][9:0], fetch_data, 6'b000000 }; 
                   inst_read_stall[thread] <= 0;
                   inst_reading <= 0;
                   if(inst_read_stall[!thread]) begin
@@ -354,7 +362,7 @@ module processor(halt, reset, clk);
                 s_stage3 <= sp[!thread];
                 sp[!thread] <= sp[!thread] - 1;
                 stalled[!thread] <= 1;
-                $display("Test thread %b, sp = ", !thread, sp[!thread]);
+                $display("Test thread %b", !thread);
             end
             `OPLt: begin
                d_stage3 <= sp[!thread]-1;
@@ -403,7 +411,7 @@ module processor(halt, reset, clk);
                 sp[!thread] <= sp[!thread] - 1;
                 pc_check[!thread] <= 1;
                 pc_jump[!thread] <= r[{!thread, sp[!thread]}];
-                $display("ret thread %b pc = %b, d = %d", !thread, r[{!thread, sp[!thread]}], {!thread, sp[!thread]});
+                $display("Ret thread %b pc = %b, d = %d", !thread, r[{!thread, sp[!thread]}], {!thread, sp[!thread]});
             end
             `OPPush: begin
                d_stage3 <= sp[!thread] + 1;
@@ -717,7 +725,6 @@ end
 always @(posedge clk) begin
   if (strobe && rnotw) begin
     // new read request
-    $display("new read request");
     raddr <= addr;
     pend <= `MEMDELAY;
   //  $display("saw the strobe");
