@@ -5,9 +5,9 @@
 `define LINESIZE [31:0]
 `define CACHESIZE [15:0]
 `define CACHEADDRSIZE [3:0]
-`define Addr    [31:22]
-`define Data    [21:6]
-`define Dirty   [5]
+`define Addr    [31:19]
+`define Data    [18:3]
+`define Dirty   [2]
 `define Opcode	[15:12]
 `define Immed	[11:0]
 `define STATE	[7:0]
@@ -16,8 +16,9 @@
 `define REGNUM	[7:0]
 `define MEMSIZE [131071:0]
 
-`define Hash & 4'b1111//[3:0] //temporary "hash"
-
+`define Hash &4'b1111
+//`define Hash & 17'b11110000000000000 >> 12//[3:0] //temporary "hash"
+//`define Hash ^ {17{thread}} & 4'b1111
 // Op-code values
 
 // Instructions with no immediate.
@@ -155,6 +156,7 @@ module processor(halt, reset, clk);
         data_thread <= 0;
         inst_reading <= 0;
         data_reading <= 0;
+        prefetch_reading <= 0;
         inst_read_started <= 0;
         data_read_started <= 0;
         inst_read_stall[0] <= 0;
@@ -170,17 +172,6 @@ module processor(halt, reset, clk);
         thread <= !thread;
     end
 
-    // TO DO
-    // Instantiate slowmem
-    // Cache register file
-        // define cache size
-    // Hash function
-    // Prefetch (last)
-    // Determine associativity (really though, we're just going to use dirty bit)
-    // Determine replacement policy
-        // FIFO / FILO (with dirty line preference)
-        // Least frequently touched
-        // Least recently touched
     reg data_read_started = 0;
     reg inst_read_started = 0;
     reg data_write_started = 0;
@@ -204,6 +195,7 @@ module processor(halt, reset, clk);
           if(data_read_started) data_read_started <= 0;
           else if(inst_read_started) inst_read_started <= 0;
           else if(data_write_started) data_write_started <= 0;
+          else if(prefetch_started) prefetch_started <= 0;
         end
         if(fetch_complete)begin
             fetch_complete <= 0;
@@ -244,22 +236,22 @@ module processor(halt, reset, clk);
         end
 
     end
-
     // Stage 1
     always @(posedge clk) begin
       if(!stalled[thread] & !(inst_read_stall[thread]) & !(data_read_stall[thread]) & !halt[thread]) begin
         if (pc_check[thread]) begin
             pc[thread] <= pc_jump[thread]+1; //if we need to jump, set the pc accordingly
-            if((inst_cache[{thread,pc_jump[thread]}`Hash]`Addr&10'h3ff) == ({thread, pc_jump[thread][9:0]}&10'h3ff)) begin
+            if(((inst_cache[{thread,pc_jump[thread]}`Hash]`Addr&13'h1fff) == ({thread, pc_jump[thread][12:0]}&13'h1fff))) begin
                 ir[thread] <= inst_cache[{thread,pc_jump[thread]}`Hash]`Data;
                 cache_data = inst_cache[{thread,pc_jump[thread]}`Hash]`Data;
                 sn_stage2 <= { (cache_data`Opcode), ((cache_data `Opcode == 0) ? cache_data[3:0] : 4'b0) };
+                $display("inst cache hit on pc_jump");
                 //since we had a cache hit and don't need to fetch from memory, might as well see if we can do a prefetch
-                if(!data_reading & !inst_reading & !prefetch_reading) begin
-                    prefetch_reading <= 1;
-                    prefetch_thread <= 1; //regardless of which thread we're in, we prefetch on thread 1 (used for testing more often)
-                    prefetch_addr <= {1'b1,pc[1]}; //more often than not the address will depend on pc instead of pc_jump
-                end
+                 if(!data_reading & !inst_reading & !prefetch_reading) begin
+                     prefetch_reading <= 1;
+                     prefetch_thread <= 1; //regardless of which thread we're in, we prefetch on thread 1 (used for testing more often)
+                     prefetch_addr <= {1'b1,pc[1]} + 1; //more often than not the address will depend on pc instead of pc_jump
+                 end
             end
             else begin
                 inst_read_stall[thread] <= 1; //signifies that we're not doing anything else until our read is finished
@@ -274,15 +266,15 @@ module processor(halt, reset, clk);
         end //if(pc_check)
         else begin
             pc[thread] <= pc[thread] + 1;
-            if((inst_cache[{thread,pc[thread]}`Hash]`Addr&10'h3ff) == ({thread, pc[thread][9:0]}&10'h3ff)) begin
+            if(((inst_cache[{thread,pc[thread]}`Hash]`Addr&13'h1fff) == ({thread, pc[thread][12:0]}&13'h1fff))) begin
                 ir[thread] <= inst_cache[{thread,pc[thread]}`Hash]`Data;
                 cache_data = inst_cache[{thread,pc[thread]}`Hash]`Data;
-                
+                $display("inst cache hit on pc");
                 sn_stage2 <= { (cache_data `Opcode), ((cache_data`Opcode == 0) ? cache_data[3:0] : 4'b0) };
                 if(!data_reading & !inst_reading & !prefetch_reading) begin
                     prefetch_reading <= 1;
                     prefetch_thread <= 1; //regardless of which thread we're in, we prefetch on thread 1 (used for testing more often)
-                    prefetch_addr <= {1'b1,pc[1]}; //more often than not the address will depend on pc instead of pc_jump
+                    prefetch_addr <= {1'b1,pc[1]} + 1; //more often than not the address will depend on pc instead of pc_jump
                 end
             end
             else begin
@@ -310,7 +302,7 @@ module processor(halt, reset, clk);
               if(fetch_complete) begin //READ COMPLETE
                   ir[thread] <= fetch_data;
                   sn_stage2 <= { (fetch_data `Opcode), ((fetch_data`Opcode == 0) ? fetch_data[3:0] : 4'b0) };
-                  inst_cache[inst_addr[thread]`Hash] <= {inst_addr[thread][9:0], fetch_data, 6'b000000 };
+                  inst_cache[inst_addr[thread]`Hash] <= {inst_addr[thread][12:0], fetch_data, 3'b000};
                   inst_read_stall[thread] <= 0;
                   inst_reading <= 0;
                   if(inst_read_stall[!thread]) begin
@@ -334,21 +326,20 @@ module processor(halt, reset, clk);
       else if(!stalled[thread] & data_reading & (data_thread == thread) & !halt[thread]) begin //this means there is a data read going on, we need to send NOPS down the pipe (i think)
         ir[thread] <= {8'hff, `OPInitial};
         sn_stage2 <= `OPInitial;
-      end    
+      end
       else begin
         ir[thread] <= {8'hff, `OPInitial};
         sn_stage2 <= `OPInitial;
-        
+
       end
-      
+
       if(prefetch_reading) begin
-          $display("prefetch_reading was set");
-          if(inst_reading | data_reading) prefetch_reading <= 0;
-          else if(mfc) begin 
-              $display("prefetch fetched a value");
-              inst_cache[prefetch_addr`Hash] <= {prefetch_addr[9:0], fetch_data, 6'b000000 };
+          if(mfc & !data_reading &! inst_reading) begin //looks like we were able to successfully prefetch
+              inst_cache[prefetch_addr`Hash] <= {prefetch_addr[12:0], fetch_data, 3'b000 };
               prefetch_reading <= 0;
           end
+          else if(mfc)
+              prefetch_reading <= 0; //we weren't able to successfully read, but some other read has gone through, we must have abandoned the prefetch
       end
     end
 
@@ -639,8 +630,7 @@ module processor(halt, reset, clk);
               end
               `OPLoad: begin
                   //need to check if the data is in the cache
-                  $display("left = %b right = %b",(data_cache[{!thread, fetch_word}`Hash]`Addr&10'h3ff), ({!thread, fetch_word[9:0]}&10'h3ff) );
-                  if((data_cache[{!thread, fetch_word}`Hash]`Addr&10'h3ff) == ({!thread, fetch_word[9:0]}&10'h3ff)) begin
+                  if(((data_cache[{!thread, fetch_word}`Hash]`Addr&13'h1fff) == ({!thread, fetch_word[12:0]}&13'h1fff))) begin
                       $display("data cache hit");
                       r[{!thread, d_stage4}] <= data_cache[{!thread, fetch_word}`Hash]`Data;
                   end
@@ -661,10 +651,17 @@ module processor(halt, reset, clk);
               `OPStore: begin
                   //m[{!thread, fetch_d}] <= fetch_s;
                   $display("Store: wdata = %b, addr = %b", fetch_word, {!thread, d_stage4});
-                  data_writing <= 1;
-                  data_wdata <= fetch_word;
-                  write_thread <= !thread;
-                  data_addr[!thread] <= {!thread, d_stage4};
+                  if((data_cache[{!thread, fetch_word}`Hash]`Addr&13'h1fff) == ({!thread, fetch_word[12:0]}&13'h1fff)) begin
+                      $display("write data cache hit");
+                      r[{!thread, d_stage4}] <= data_cache[{!thread, fetch_word}`Hash]`Data;
+                      data_cache[{!thread, fetch_word}`Hash]`Dirty <= 1;
+                  end
+                  else begin
+                    data_writing <= 1;
+                    data_wdata <= fetch_word;
+                    write_thread <= !thread;
+                    data_addr[!thread] <= {!thread, d_stage4};
+                  end
                   r[{!thread, d_stage4}] <= fetch_word;
               end
               `OPRet: begin
@@ -710,7 +707,7 @@ module processor(halt, reset, clk);
                 data_writing <= 1;
                 data_wdata <= data_cache[data_addr[!thread]`Hash]`Data;
             end
-            data_cache[data_addr[!thread]`Hash] <= {data_addr[!thread][9:0], fetch_data, 6'b000000};
+            data_cache[data_addr[!thread]`Hash] <= {data_addr[!thread][12:0], fetch_data, 3'b000};
             data_read_stall[!thread] <= 0;
             data_reading <= 0;
             if(data_read_stall[thread])
