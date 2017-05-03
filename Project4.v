@@ -3,8 +3,18 @@
 // Sizes
 `define WORD	[15:0]
 `define LINESIZE [31:0]
-`define CACHESIZE [15:0]
-`define CACHEADDRSIZE [3:0]
+//defines to use for tiny cache (8)
+//`define CACHESIZE [7:0]
+//`define CACHEADDRSIZE [2:0]
+//`define Hash &3'b111
+//defines to use for small cache (16)
+//`define CACHESIZE [15:0]
+//`define CACHEADDRSIZE [3:0]
+//`define Hash &4'b1111 //"hash" for cachesize 16
+//defines to use for large cache (256)
+`define CACHESIZE [255:0]
+`define CACHEADDRSIZE [7:0]
+`define Hash &8'b11111111 //"hash" for cachesize 256
 `define Addr    [31:19]
 `define Data    [18:3]
 `define Dirty   [2]
@@ -16,9 +26,6 @@
 `define REGNUM	[7:0]
 `define MEMSIZE [131071:0]
 
-`define Hash &4'b1111
-//`define Hash & 17'b11110000000000000 >> 12//[3:0] //temporary "hash"
-//`define Hash ^ {17{thread}} & 4'b1111
 // Op-code values
 
 // Instructions with no immediate.
@@ -241,7 +248,7 @@ module processor(halt, reset, clk);
       if(!stalled[thread] & !(inst_read_stall[thread]) & !(data_read_stall[thread]) & !halt[thread]) begin
         if (pc_check[thread]) begin
             pc[thread] <= pc_jump[thread]+1; //if we need to jump, set the pc accordingly
-            if(((inst_cache[{thread,pc_jump[thread]}`Hash]`Addr&13'h1fff) == ({thread, pc_jump[thread][12:0]}&13'h1fff))) begin
+            if(((inst_cache[{thread,pc_jump[thread]}`Hash]`Addr&13'h1fff) == ({thread, pc_jump[thread][15:4]}&13'h1fff))) begin
                 ir[thread] <= inst_cache[{thread,pc_jump[thread]}`Hash]`Data;
                 cache_data = inst_cache[{thread,pc_jump[thread]}`Hash]`Data;
                 sn_stage2 <= { (cache_data`Opcode), ((cache_data `Opcode == 0) ? cache_data[3:0] : 4'b0) };
@@ -266,7 +273,7 @@ module processor(halt, reset, clk);
         end //if(pc_check)
         else begin
             pc[thread] <= pc[thread] + 1;
-            if(((inst_cache[{thread,pc[thread]}`Hash]`Addr&13'h1fff) == ({thread, pc[thread][12:0]}&13'h1fff))) begin
+            if(((inst_cache[{thread,pc[thread]}`Hash]`Addr&13'h1fff) == ({thread, pc[thread][15:4]}&13'h1fff))) begin
                 ir[thread] <= inst_cache[{thread,pc[thread]}`Hash]`Data;
                 cache_data = inst_cache[{thread,pc[thread]}`Hash]`Data;
                 $display("inst cache hit on pc");
@@ -302,7 +309,7 @@ module processor(halt, reset, clk);
               if(fetch_complete) begin //READ COMPLETE
                   ir[thread] <= fetch_data;
                   sn_stage2 <= { (fetch_data `Opcode), ((fetch_data`Opcode == 0) ? fetch_data[3:0] : 4'b0) };
-                  inst_cache[inst_addr[thread]`Hash] <= {inst_addr[thread][12:0], fetch_data, 3'b000};
+                  inst_cache[inst_addr[thread]`Hash] <= {inst_addr[thread][16:4], fetch_data, 3'b000};
                   inst_read_stall[thread] <= 0;
                   inst_reading <= 0;
                   if(inst_read_stall[!thread]) begin
@@ -335,7 +342,7 @@ module processor(halt, reset, clk);
 
       if(prefetch_reading) begin
           if(mfc & !data_reading &! inst_reading) begin //looks like we were able to successfully prefetch
-              inst_cache[prefetch_addr`Hash] <= {prefetch_addr[12:0], fetch_data, 3'b000 };
+              inst_cache[prefetch_addr`Hash] <= {prefetch_addr[16:4], fetch_data, 3'b000 };
               prefetch_reading <= 0;
           end
           else if(mfc)
@@ -480,7 +487,7 @@ module processor(halt, reset, clk);
 
             `OPInitial: begin
                 //I guess this is the equivalent of a NOP? --Matthew
-                //$display("Initial/NOP thread %b", !thread);
+                $display("Initial/NOP thread %b", !thread);
             end
             default: begin
                 halt[!thread] <= 1;
@@ -630,7 +637,7 @@ module processor(halt, reset, clk);
               end
               `OPLoad: begin
                   //need to check if the data is in the cache
-                  if(((data_cache[{!thread, fetch_word}`Hash]`Addr&13'h1fff) == ({!thread, fetch_word[12:0]}&13'h1fff))) begin
+                  if(((data_cache[{!thread, fetch_word}`Hash]`Addr&13'h1fff) == ({!thread, fetch_word[15:4]}&13'h1fff))) begin
                       $display("data cache hit");
                       r[{!thread, d_stage4}] <= data_cache[{!thread, fetch_word}`Hash]`Data;
                   end
@@ -651,7 +658,7 @@ module processor(halt, reset, clk);
               `OPStore: begin
                   //m[{!thread, fetch_d}] <= fetch_s;
                   $display("Store: wdata = %b, addr = %b", fetch_word, {!thread, d_stage4});
-                  if((data_cache[{!thread, fetch_word}`Hash]`Addr&13'h1fff) == ({!thread, fetch_word[12:0]}&13'h1fff)) begin
+                  if((data_cache[{!thread, fetch_word}`Hash]`Addr&13'h1fff) == ({!thread, fetch_word[15:4]}&13'h1fff)) begin
                       $display("write data cache hit");
                       r[{!thread, d_stage4}] <= data_cache[{!thread, fetch_word}`Hash]`Data;
                       data_cache[{!thread, fetch_word}`Hash]`Dirty <= 1;
@@ -707,7 +714,7 @@ module processor(halt, reset, clk);
                 data_writing <= 1;
                 data_wdata <= data_cache[data_addr[!thread]`Hash]`Data;
             end
-            data_cache[data_addr[!thread]`Hash] <= {data_addr[!thread][12:0], fetch_data, 3'b000};
+            data_cache[data_addr[!thread]`Hash] <= {data_addr[!thread][16:4], fetch_data, 3'b000};
             data_read_stall[!thread] <= 0;
             data_reading <= 0;
             if(data_read_stall[thread])
